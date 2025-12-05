@@ -1,0 +1,24 @@
+{
+  "name": "travelers.ai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI-powered travel planning with educational POI content",
+  "scripts": {
+    "dev:api": "pnpm --filter @travelers/api dev",
+    "dev:mobile": "pnpm --filter @travelers/mobile start",
+    "dev:web": "pnpm --filter @travelers/web dev",
+    "build:shared": "pnpm --filter @travelers/shared build",
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test",
+    "clean": "pnpm -r clean"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.0",
+    "prettier": "^3.1.0",
+    "eslint": "^8.56.0"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=8.0.0"
+  }
+}
