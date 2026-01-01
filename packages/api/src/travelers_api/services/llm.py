@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from abc import ABC, abstractmethod
 from functools import lru_cache
 from typing import Literal
@@ -5,6 +7,8 @@ from typing import Literal
 from pydantic import BaseModel
 
 from ..core.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 class POIData(BaseModel):
@@ -113,27 +117,39 @@ class LlamaCppProvider(LLMProvider):
                 raise ImportError("llama-cpp-python is required for local inference")
         return self._llm
 
-    async def generate_summary(
-        self, poi_data: POIData, language: Literal["en", "es"] = "en"
-    ) -> str:
+    def _sync_generate(self, prompt: str) -> str:
+        """Synchronous generation - runs in thread pool."""
         llm = self._get_llm()
-        prompt = self._build_prompt(poi_data, language)
-
         output = llm(
             prompt,
             max_tokens=200,
             temperature=0.7,
             stop=["###", "\n\n\n"],
         )
-
         return output["choices"][0]["text"].strip()
+
+    async def generate_summary(
+        self, poi_data: POIData, language: Literal["en", "es"] = "en"
+    ) -> str:
+        """Generate summary using thread pool to avoid blocking event loop."""
+        prompt = self._build_prompt(poi_data, language)
+
+        # Run synchronous LLM call in thread pool executor
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, self._sync_generate, prompt)
+        return result
 
 
 class OpenAIProvider(LLMProvider):
     """OpenAI API provider"""
 
-    def __init__(self, api_key: str | None = None):
+    DEFAULT_MODEL = "gpt-4o-mini"
+    DEFAULT_TIMEOUT = 30.0
+
+    def __init__(self, api_key: str | None = None, model: str | None = None, timeout: float | None = None):
         self.api_key = api_key
+        self.model = model or self.DEFAULT_MODEL
+        self.timeout = timeout or self.DEFAULT_TIMEOUT
         self._client = None
 
     def _get_client(self):
@@ -143,7 +159,7 @@ class OpenAIProvider(LLMProvider):
 
                 if not self.api_key:
                     raise ValueError("OPENAI_API_KEY environment variable is required")
-                self._client = AsyncOpenAI(api_key=self.api_key)
+                self._client = AsyncOpenAI(api_key=self.api_key, timeout=self.timeout)
             except ImportError:
                 raise ImportError("openai package is required for OpenAI provider")
         return self._client
@@ -154,21 +170,34 @@ class OpenAIProvider(LLMProvider):
         client = self._get_client()
         prompt = self._build_prompt(poi_data, language)
 
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=200,
-            temperature=0.7,
-        )
+        try:
+            response = await client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=200,
+                temperature=0.7,
+            )
 
-        return response.choices[0].message.content.strip()
+            content = response.choices[0].message.content
+            if not content:
+                logger.warning(f"Empty response from OpenAI for POI: {poi_data.name}")
+                return ""
+            return content.strip()
+        except Exception as e:
+            logger.error(f"OpenAI API error for POI {poi_data.name}: {e}")
+            raise
 
 
 class AnthropicProvider(LLMProvider):
     """Anthropic Claude API provider"""
 
-    def __init__(self, api_key: str | None = None):
+    DEFAULT_MODEL = "claude-3-haiku-20240307"
+    DEFAULT_TIMEOUT = 30.0
+
+    def __init__(self, api_key: str | None = None, model: str | None = None, timeout: float | None = None):
         self.api_key = api_key
+        self.model = model or self.DEFAULT_MODEL
+        self.timeout = timeout or self.DEFAULT_TIMEOUT
         self._client = None
 
     def _get_client(self):
@@ -178,7 +207,7 @@ class AnthropicProvider(LLMProvider):
 
                 if not self.api_key:
                     raise ValueError("ANTHROPIC_API_KEY environment variable is required")
-                self._client = AsyncAnthropic(api_key=self.api_key)
+                self._client = AsyncAnthropic(api_key=self.api_key, timeout=self.timeout)
             except ImportError:
                 raise ImportError("anthropic package is required for Anthropic provider")
         return self._client
@@ -189,21 +218,34 @@ class AnthropicProvider(LLMProvider):
         client = self._get_client()
         prompt = self._build_prompt(poi_data, language)
 
-        response = await client.messages.create(
-            model="claude-3-haiku-20240307",
-            max_tokens=200,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        try:
+            response = await client.messages.create(
+                model=self.model,
+                max_tokens=200,
+                messages=[{"role": "user", "content": prompt}],
+            )
 
-        return response.content[0].text.strip()
+            if not response.content:
+                logger.warning(f"Empty response from Anthropic for POI: {poi_data.name}")
+                return ""
+            return response.content[0].text.strip()
+        except Exception as e:
+            logger.error(f"Anthropic API error for POI {poi_data.name}: {e}")
+            raise
 
 
 @lru_cache
-def get_llm_provider() -> LLMProvider:
-    """Factory function to get the configured LLM provider"""
+def get_llm_provider() -> LLMProvider | None:
+    """Factory function to get the configured LLM provider.
+
+    Returns None if LLM is disabled (provider='none').
+    """
     settings = get_settings()
 
-    if settings.llm_provider == "llama":
+    if settings.llm_provider == "none":
+        logger.info("LLM provider disabled")
+        return None
+    elif settings.llm_provider == "llama":
         return LlamaCppProvider(model_path=settings.llama_model_path)
     elif settings.llm_provider == "openai":
         return OpenAIProvider(api_key=settings.openai_api_key)
